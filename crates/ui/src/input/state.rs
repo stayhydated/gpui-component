@@ -5,7 +5,7 @@
 use anyhow::Result;
 use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+    EventEmitter, FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, KeyBinding,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString, Styled as _,
     Subscription, Task, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _,
@@ -125,6 +125,70 @@ pub enum InputEvent {
     PressEnter { secondary: bool, shift: bool },
     Focus,
     Blur,
+}
+
+/// A snapshot emitted when the local input selection or caret changes.
+///
+/// `anchor` is the fixed end of the selection and `head` is the moving caret.
+/// Both values are UTF-8 byte offsets into the input value. A collapsed
+/// selection has equal offsets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputSelectionEvent {
+    /// The fixed endpoint of the selection as a UTF-8 byte offset.
+    pub anchor: usize,
+    /// The moving caret endpoint as a UTF-8 byte offset.
+    pub head: usize,
+}
+
+impl InputSelectionEvent {
+    /// Returns the normalized byte range covered by the selection.
+    pub fn range(&self) -> Range<usize> {
+        self.anchor.min(self.head)..self.anchor.max(self.head)
+    }
+
+    /// Returns whether the event represents a caret without selected text.
+    pub fn is_collapsed(&self) -> bool {
+        self.anchor == self.head
+    }
+}
+
+/// A remote selection rendered by an [`InputState`].
+///
+/// `anchor` and `head` are UTF-8 byte offsets into the input value and retain
+/// the selection direction. The highlight uses a low-opacity form of `color`,
+/// while the caret at `head` uses the full color.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InputRemoteSelection {
+    /// A stable identity supplied by the caller.
+    pub id: SharedString,
+    /// The fixed endpoint of the selection as a UTF-8 byte offset.
+    pub anchor: usize,
+    /// The caret endpoint as a UTF-8 byte offset.
+    pub head: usize,
+    /// The base color used for the selection highlight and caret.
+    pub color: Hsla,
+}
+
+impl InputRemoteSelection {
+    /// Creates a remote selection with a stable caller-provided identity.
+    pub fn new(id: impl Into<SharedString>, anchor: usize, head: usize, color: Hsla) -> Self {
+        Self {
+            id: id.into(),
+            anchor,
+            head,
+            color,
+        }
+    }
+
+    /// Returns the normalized byte range covered by the selection.
+    pub fn range(&self) -> Range<usize> {
+        self.anchor.min(self.head)..self.anchor.max(self.head)
+    }
+
+    /// Returns whether this selection contains only a caret.
+    pub fn is_collapsed(&self) -> bool {
+        self.anchor == self.head
+    }
 }
 
 pub(super) const CONTEXT: &str = "Input";
@@ -350,6 +414,8 @@ pub struct InputState {
     /// - "Hello 世界💝" = 16
     /// - "💝" = 4
     pub(super) selected_range: Selection,
+    pub(super) remote_selections: Vec<InputRemoteSelection>,
+    last_emitted_selection: InputSelectionEvent,
     pub(super) search_panel: Option<Entity<SearchPanel>>,
     pub(super) searchable: bool,
     pub(super) replaceable: bool,
@@ -452,6 +518,7 @@ pub struct InputState {
 }
 
 impl EventEmitter<InputEvent> for InputState {}
+impl EventEmitter<InputSelectionEvent> for InputState {}
 
 impl InputState {
     /// Create a Input state with default [`InputMode::SingleLine`] mode.
@@ -489,6 +556,8 @@ impl InputState {
             blink_cursor,
             history,
             selected_range: Selection::default(),
+            remote_selections: Vec::new(),
+            last_emitted_selection: InputSelectionEvent::default(),
             search_panel: None,
             searchable: false,
             replaceable: true,
@@ -798,6 +867,7 @@ impl InputState {
         self.reset_scroll_to_start();
 
         self.history.clear();
+        self.emit_selection_changed(cx);
         cx.notify();
     }
 
@@ -821,6 +891,7 @@ impl InputState {
         self.reset_lsp_state();
         self.reset_scroll_to_start();
 
+        self.emit_selection_changed(cx);
         cx.notify();
     }
 
@@ -839,6 +910,7 @@ impl InputState {
         let range_utf16 = self.range_to_utf16(&(self.cursor()..self.cursor()));
         self.replace_text_in_range_silent(Some(range_utf16), &text, window, cx);
         self.selected_range = (self.selected_range.end..self.selected_range.end).into();
+        self.emit_selection_changed(cx);
         self.disabled = was_disabled;
     }
 
@@ -856,6 +928,7 @@ impl InputState {
         let text: SharedString = text.into();
         self.replace_text_in_range_silent(None, &text, window, cx);
         self.selected_range = (self.selected_range.end..self.selected_range.end).into();
+        self.emit_selection_changed(cx);
         self.disabled = was_disabled;
     }
 
@@ -1294,6 +1367,7 @@ impl InputState {
 
     pub(super) fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.selected_range = (0..self.text.len()).into();
+        self.emit_selection_changed(cx);
         cx.notify();
     }
 
@@ -1656,6 +1730,7 @@ impl InputState {
         self.replace_text("", window, cx);
         self.selected_range = (0..0).into();
         self.scroll_to(0, None, cx);
+        self.emit_selection_changed(cx);
     }
 
     pub(super) fn escape(&mut self, action: &Escape, window: &mut Window, cx: &mut Context<Self>) {
@@ -1767,10 +1842,12 @@ impl InputState {
 
         // If there have IME marked range and is empty (Means pressed Esc to abort IME typing)
         // Clear the marked range.
-        if let Some(ime_marked_range) = &self.ime_marked_range {
-            if ime_marked_range.len() == 0 {
-                self.ime_marked_range = None;
-            }
+        if self
+            .ime_marked_range
+            .is_some_and(|marked_range| marked_range.is_empty())
+        {
+            self.ime_marked_range = None;
+            self.emit_selection_changed(cx);
         }
 
         self.selecting = true;
@@ -2139,16 +2216,115 @@ impl InputState {
         self.selected_range.into()
     }
 
+    /// Returns the current local selection with its direction preserved.
+    ///
+    /// `anchor` is the fixed endpoint and `head` is the caret. During an IME
+    /// composition the marked-text caret is returned as a collapsed selection.
+    pub fn selection(&self) -> InputSelectionEvent {
+        if let Some(marked_range) = self.ime_marked_range {
+            return InputSelectionEvent {
+                anchor: marked_range.end,
+                head: marked_range.end,
+            };
+        }
+
+        if self.selection_reversed {
+            InputSelectionEvent {
+                anchor: self.selected_range.end,
+                head: self.selected_range.start,
+            }
+        } else {
+            InputSelectionEvent {
+                anchor: self.selected_range.start,
+                head: self.selected_range.end,
+            }
+        }
+    }
+
+    /// Returns the remote selections currently rendered by the input.
+    pub fn remote_selections(&self) -> &[InputRemoteSelection] {
+        &self.remote_selections
+    }
+
+    /// Replaces the remote selections rendered by the input.
+    ///
+    /// Each endpoint is clipped to a valid UTF-8 boundary in the current input
+    /// value. Selection direction and caller-provided identities are retained.
+    /// This method only updates remote rendering state.
+    pub fn set_remote_selections(
+        &mut self,
+        selections: impl IntoIterator<Item = InputRemoteSelection>,
+        cx: &mut Context<Self>,
+    ) {
+        let selections = selections
+            .into_iter()
+            .map(|selection| Self::clip_remote_selection(&self.text, selection))
+            .collect::<Vec<_>>();
+        if self.remote_selections == selections {
+            return;
+        }
+
+        self.remote_selections = selections;
+        cx.notify();
+    }
+
+    /// Clears all remote selections rendered by the input.
+    pub fn clear_remote_selections(&mut self, cx: &mut Context<Self>) {
+        if self.remote_selections.is_empty() {
+            return;
+        }
+
+        self.remote_selections.clear();
+        cx.notify();
+    }
+
+    fn clip_remote_selection(
+        text: &Rope,
+        mut selection: InputRemoteSelection,
+    ) -> InputRemoteSelection {
+        selection.anchor = text.clip_offset(selection.anchor.min(text.len()), Bias::Left);
+        selection.head = text.clip_offset(selection.head.min(text.len()), Bias::Left);
+        selection
+    }
+
+    fn normalize_remote_selections(&mut self) {
+        for selection in &mut self.remote_selections {
+            selection.anchor = self
+                .text
+                .clip_offset(selection.anchor.min(self.text.len()), Bias::Left);
+            selection.head = self
+                .text
+                .clip_offset(selection.head.min(self.text.len()), Bias::Left);
+        }
+    }
+
+    pub(super) fn emit_selection_changed(&mut self, cx: &mut Context<Self>) {
+        let selection = self.selection();
+        if selection == self.last_emitted_selection {
+            return;
+        }
+
+        self.last_emitted_selection = selection;
+        cx.emit(selection);
+    }
+
     /// Set the selected range using UTF-8 byte offsets.
     pub fn set_selected_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
         let len = self.text.len();
-        let start = range.start.min(len);
-        let end = range.end.min(len);
+        let anchor = self.text.clip_offset(range.start.min(len), Bias::Left);
+        let head = self.text.clip_offset(range.end.min(len), Bias::Left);
 
-        self.move_to(start, None, cx);
-        self.selection_reversed = false;
+        self.cursor_line_end_affinity = false;
+        self.selected_range = (anchor.min(head)..anchor.max(head)).into();
+        self.selection_reversed = head < anchor;
         self.selected_word_range = None;
-        self.select_to(end, cx);
+        self.scroll_to(head, None, cx);
+        self.pause_blink_cursor(cx);
+        self.update_preferred_column();
+        self.hide_context_menu(cx);
+        self.clear_inline_completion(cx);
+        self.emit_selection_changed(cx);
+        cx.notify();
     }
 
     pub(crate) fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
@@ -2262,6 +2438,7 @@ impl InputState {
         if self.selected_range.is_empty() {
             self.update_preferred_column();
         }
+        self.emit_selection_changed(cx);
         cx.notify()
     }
 
@@ -2269,6 +2446,7 @@ impl InputState {
     pub fn unselect(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let offset = self.cursor();
         self.selected_range = (offset..offset).into();
+        self.emit_selection_changed(cx);
         cx.notify()
     }
 
@@ -2844,8 +3022,9 @@ impl EntityInputHandler for InputState {
             .map(|range| self.range_to_utf16(&range.into()))
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.ime_marked_range = None;
+        self.emit_selection_changed(cx);
     }
 
     /// Replace text in range.
@@ -2944,6 +3123,7 @@ impl EntityInputHandler for InputState {
         self.lsp.update(&self.text, window, cx);
         self.selected_range = (new_offset..new_offset).into();
         self.ime_marked_range.take();
+        self.normalize_remote_selections();
         self.update_preferred_column();
         self.update_search(cx);
         self.mode.update_auto_grow(&self.display_map);
@@ -2953,6 +3133,7 @@ impl EntityInputHandler for InputState {
         if self.emit_events {
             cx.emit(InputEvent::Change);
         }
+        self.emit_selection_changed(cx);
         cx.notify();
     }
 
@@ -3029,9 +3210,11 @@ impl EntityInputHandler for InputState {
                 .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len())
                 .into();
         }
+        self.normalize_remote_selections();
         self.mode.update_auto_grow(&self.display_map);
         self.history.start_grouping();
         self.push_history(&old_text, &range, new_text);
+        self.emit_selection_changed(cx);
         cx.notify();
     }
 
@@ -3151,6 +3334,11 @@ impl Render for InputState {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+
     use super::*;
     use crate::theme::Theme;
     use gpui::{TestAppContext, VisualTestContext};
@@ -3191,6 +3379,207 @@ mod tests {
                 window_handle: window,
             }
         }
+    }
+
+    struct InputEventCollector {
+        _input: Entity<InputState>,
+        selection_events: Rc<RefCell<Vec<InputSelectionEvent>>>,
+        input_event_count: Rc<Cell<usize>>,
+        _subscriptions: Vec<Subscription>,
+    }
+
+    impl InputEventCollector {
+        fn new(input: &Entity<InputState>, cx: &mut Context<Self>) -> Self {
+            let selection_events = Rc::new(RefCell::new(Vec::new()));
+            let collected_selection_events = Rc::clone(&selection_events);
+            let input_event_count = Rc::new(Cell::new(0));
+            let collected_input_event_count = Rc::clone(&input_event_count);
+            let subscriptions = vec![
+                cx.subscribe(input, move |_, _, event: &InputSelectionEvent, _| {
+                    collected_selection_events.borrow_mut().push(*event);
+                }),
+                cx.subscribe(input, move |_, _, _: &InputEvent, _| {
+                    collected_input_event_count.set(collected_input_event_count.get() + 1);
+                }),
+            ];
+
+            Self {
+                _input: input.clone(),
+                selection_events,
+                input_event_count,
+                _subscriptions: subscriptions,
+            }
+        }
+    }
+
+    impl Render for InputEventCollector {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    #[gpui::test]
+    fn test_remote_selections_clamp_replace_and_clear_without_local_mutation(
+        cx: &mut TestAppContext,
+    ) {
+        let input_view = InputView::build(cx, |state| state.default_value("é🙂z"));
+        let input = input_view.input;
+        let collector = cx.new(|cx| InputEventCollector::new(&input, cx));
+        let before = input.read_with(cx, |state, _| {
+            (
+                state.value(),
+                state.selection(),
+                state.scroll_handle.offset(),
+                state.deferred_scroll_offset,
+                state.history.undos().len(),
+            )
+        });
+
+        input.update(cx, |state, cx| {
+            state.set_remote_selections(
+                [
+                    InputRemoteSelection::new("first", usize::MAX, 1, gpui::red()),
+                    InputRemoteSelection::new("second", 4, 6, gpui::blue()),
+                ],
+                cx,
+            );
+
+            assert_eq!(
+                state.remote_selections(),
+                &[
+                    InputRemoteSelection::new("first", 7, 0, gpui::red()),
+                    InputRemoteSelection::new("second", 2, 6, gpui::blue()),
+                ]
+            );
+
+            state.set_remote_selections(
+                [InputRemoteSelection::new(
+                    "replacement",
+                    2,
+                    7,
+                    gpui::green(),
+                )],
+                cx,
+            );
+            assert_eq!(
+                state.remote_selections(),
+                &[InputRemoteSelection::new(
+                    "replacement",
+                    2,
+                    7,
+                    gpui::green()
+                )]
+            );
+
+            state.clear_remote_selections(cx);
+            state.clear_remote_selections(cx);
+            assert!(state.remote_selections().is_empty());
+        });
+
+        let after = input.read_with(cx, |state, _| {
+            (
+                state.value(),
+                state.selection(),
+                state.scroll_handle.offset(),
+                state.deferred_scroll_offset,
+                state.history.undos().len(),
+            )
+        });
+        assert_eq!(after, before);
+        collector.read_with(cx, |collector, _| {
+            assert!(collector.selection_events.borrow().is_empty());
+            assert_eq!(collector.input_event_count.get(), 0);
+        });
+    }
+
+    #[gpui::test]
+    fn test_selection_events_preserve_direction_and_skip_no_ops(cx: &mut TestAppContext) {
+        let input_view = InputView::build(cx, |state| state.default_value("hello"));
+        let input = input_view.input;
+        let collector = cx.new(|cx| InputEventCollector::new(&input, cx));
+
+        input.update(cx, |state, cx| {
+            state.set_selected_range(1..4, cx);
+            state.set_selected_range(1..4, cx);
+            state.set_selected_range(4..1, cx);
+            state.move_to(1, None, cx);
+            state.move_to(1, None, cx);
+            state.select_to(3, cx);
+            state.select_to(3, cx);
+        });
+
+        let events = collector.read_with(cx, |collector, _| {
+            collector.selection_events.borrow().clone()
+        });
+        assert_eq!(
+            events,
+            vec![
+                InputSelectionEvent { anchor: 1, head: 4 },
+                InputSelectionEvent { anchor: 4, head: 1 },
+                InputSelectionEvent { anchor: 1, head: 1 },
+                InputSelectionEvent { anchor: 1, head: 3 },
+            ]
+        );
+        assert_eq!(events[0].range(), 1..4);
+        assert!(!events[0].is_collapsed());
+        assert!(events[2].is_collapsed());
+    }
+
+    #[gpui::test]
+    fn test_text_and_ime_updates_keep_selection_event_snapshot_current(cx: &mut TestAppContext) {
+        let input_view = InputView::build(cx, |state| state);
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+        let collector = cx.new(|cx| InputEventCollector::new(&input, cx));
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_value("abc", window, cx);
+            });
+        });
+        let event_count = cx.update(|_, cx| {
+            collector.read_with(cx, |collector, _| collector.selection_events.borrow().len())
+        });
+        cx.update(|_, cx| {
+            input.update(cx, |state, cx| state.move_to(3, None, cx));
+        });
+        assert_eq!(
+            cx.update(|_, cx| {
+                collector.read_with(cx, |collector, _| collector.selection_events.borrow().len())
+            }),
+            event_count,
+            "a no-op move after replacement must not emit a stale event"
+        );
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_remote_selections(
+                    [InputRemoteSelection::new("remote", 3, 3, gpui::red())],
+                    cx,
+                );
+                state.set_value("é", window, cx);
+                assert_eq!(state.remote_selections()[0].anchor, 2);
+                assert_eq!(state.remote_selections()[0].head, 2);
+
+                state.replace_and_mark_text_in_range(None, "x", None, window, cx);
+            });
+        });
+        let event_count = cx.update(|_, cx| {
+            collector.read_with(cx, |collector, _| collector.selection_events.borrow().len())
+        });
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                state.emit_selection_changed(cx);
+                state.unmark_text(window, cx);
+            });
+        });
+        assert_eq!(
+            cx.update(|_, cx| {
+                collector.read_with(cx, |collector, _| collector.selection_events.borrow().len())
+            }),
+            event_count,
+            "IME selection snapshots must be de-duplicated"
+        );
     }
 
     #[gpui::test]

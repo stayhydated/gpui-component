@@ -52,6 +52,7 @@ impl InputState {
         self.update_preferred_column();
         self.hide_context_menu(cx);
         self.clear_inline_completion(cx);
+        self.emit_selection_changed(cx);
         cx.notify()
     }
 

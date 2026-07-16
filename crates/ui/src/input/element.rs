@@ -217,6 +217,65 @@ fn masked_display_offset(text: &Rope, original_offset: usize) -> usize {
     text.offset_to_char_index(original_offset) * MASK_CHAR.len_utf8()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct VisibleRemoteSelection {
+    selection_range: Option<Range<usize>>,
+    caret_offset: Option<usize>,
+}
+
+fn visible_remote_selection(
+    anchor: usize,
+    head: usize,
+    visible_range: &Range<usize>,
+) -> VisibleRemoteSelection {
+    let range = anchor.min(head)..anchor.max(head);
+    let selection_start = range.start.max(visible_range.start);
+    let selection_end = range.end.min(visible_range.end);
+    let selection_range =
+        (selection_start < selection_end).then_some(selection_start..selection_end);
+    let caret_offset = (head >= visible_range.start && head <= visible_range.end).then_some(head);
+
+    VisibleRemoteSelection {
+        selection_range,
+        caret_offset,
+    }
+}
+
+fn caret_height(size: crate::Size, line_height: Pixels) -> Pixels {
+    let scale = match size {
+        crate::Size::Large => 1.,
+        crate::Size::Small => 0.75,
+        _ => 0.85,
+    };
+    scale * line_height
+}
+
+fn remote_caret_bounds(
+    position: Point<Pixels>,
+    line_top: Pixels,
+    bounds: &Bounds<Pixels>,
+    line_number_width: Pixels,
+    line_height: Pixels,
+    input_size: crate::Size,
+    text_align: TextAlign,
+) -> Bounds<Pixels> {
+    let cursor_height = caret_height(input_size, line_height);
+    let cursor_x = bounds.left() + line_number_width + position.x;
+    let cursor_x = if text_align == TextAlign::Right {
+        cursor_x.min(bounds.right() - CURSOR_WIDTH)
+    } else {
+        cursor_x
+    };
+
+    Bounds::new(
+        point(
+            cursor_x,
+            bounds.top() + line_top + position.y + ((line_height - cursor_height) / 2.),
+        ),
+        size(CURSOR_WIDTH, cursor_height),
+    )
+}
+
 /// Minimum pixel padding the cursor is kept clear of the viewport's
 /// top/bottom edges before auto-scroll engages. Backs
 /// [`InputState::cursor_surrounding_lines`].
@@ -468,11 +527,7 @@ impl TextElement {
             }
 
             // cursor bounds
-            let cursor_height = match state.size {
-                crate::Size::Large => 1.,
-                crate::Size::Small => 0.75,
-                _ => 0.85,
-            } * line_height;
+            let cursor_height = caret_height(state.size, line_height);
 
             // Match the caret to the deferred scroll target (applied below) that
             // the text paints at; otherwise the caret follows the cursor-scroll
@@ -720,6 +775,84 @@ impl TextElement {
         }
 
         paths
+    }
+
+    fn layout_remote_caret(
+        raw_offset: usize,
+        display_offset: usize,
+        last_layout: &LastLayout,
+        bounds: &Bounds<Pixels>,
+        state: &InputState,
+    ) -> Option<Bounds<Pixels>> {
+        let buffer_row = state.text.offset_to_point(raw_offset).row;
+        let visible_index = last_layout
+            .visible_buffer_lines
+            .binary_search(&buffer_row)
+            .ok()?;
+        let line = last_layout.lines.get(visible_index)?;
+        let line_start = *last_layout.visible_line_byte_offsets.get(visible_index)?;
+        let local_offset = display_offset.checked_sub(line_start)?;
+        let position = line.position_for_index(local_offset, last_layout, false)?;
+        let offset_y = last_layout.visible_top
+            + last_layout
+                .lines
+                .iter()
+                .take(visible_index)
+                .map(|line| line.size(last_layout.line_height).height)
+                .sum::<Pixels>();
+        Some(remote_caret_bounds(
+            position,
+            offset_y,
+            bounds,
+            last_layout.line_number_width,
+            last_layout.line_height,
+            state.size,
+            last_layout.text_align,
+        ))
+    }
+
+    fn layout_remote_selections(
+        &self,
+        last_layout: &LastLayout,
+        bounds: &Bounds<Pixels>,
+        cx: &mut App,
+    ) -> Vec<RemoteSelectionLayout> {
+        let state = self.state.read(cx);
+        let mut layouts = Vec::with_capacity(state.remote_selections.len());
+
+        for selection in &state.remote_selections {
+            let raw_anchor = selection.anchor;
+            let raw_head = selection.head;
+            let (display_anchor, display_head) = if state.masked {
+                (
+                    masked_display_offset(&state.text, raw_anchor),
+                    masked_display_offset(&state.text, raw_head),
+                )
+            } else {
+                (raw_anchor, raw_head)
+            };
+            let visible = visible_remote_selection(
+                display_anchor,
+                display_head,
+                &last_layout.visible_range_offset,
+            );
+            let selection_path = visible
+                .selection_range
+                .and_then(|range| Self::layout_match_range(range, last_layout, bounds));
+            let caret_bounds = visible.caret_offset.and_then(|display_offset| {
+                Self::layout_remote_caret(raw_head, display_offset, last_layout, bounds, state)
+            });
+
+            if selection_path.is_some() || caret_bounds.is_some() {
+                layouts.push(RemoteSelectionLayout {
+                    selection_path,
+                    caret_bounds,
+                    color: selection.color,
+                });
+            }
+        }
+
+        layouts
     }
 
     fn layout_selections(
@@ -1374,6 +1507,12 @@ impl TextElement {
     }
 }
 
+struct RemoteSelectionLayout {
+    selection_path: Option<Path<Pixels>>,
+    caret_bounds: Option<Bounds<Pixels>>,
+    color: Hsla,
+}
+
 pub(super) struct PrepaintState {
     /// The lines of entire lines.
     last_layout: LastLayout,
@@ -1387,6 +1526,7 @@ pub(super) struct PrepaintState {
     cursor_scroll_offset: Point<Pixels>,
     /// row index (zero based), no wrap, same line as the cursor.
     current_row: Option<usize>,
+    remote_selections: Vec<RemoteSelectionLayout>,
     selection_path: Option<Path<Pixels>>,
     hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
@@ -1812,6 +1952,7 @@ impl Element for TextElement {
         last_layout.cursor_bounds = cursor_bounds;
 
         let search_match_paths = self.layout_search_matches(&last_layout, &mut bounds, cx);
+        let remote_selections = self.layout_remote_selections(&last_layout, &bounds, cx);
         let selection_path = self.layout_selections(&last_layout, &mut bounds, window, cx);
         let hover_highlight_path = self.layout_hover_highlight(&last_layout, &mut bounds, cx);
         let document_color_paths =
@@ -1891,6 +2032,7 @@ impl Element for TextElement {
             cursor_bounds,
             cursor_scroll_offset,
             current_row,
+            remote_selections,
             selection_path,
             search_match_paths,
             hover_highlight_path,
@@ -2005,6 +2147,12 @@ impl Element for TextElement {
             window.paint_path(path, cx.theme().border.opacity(0.85));
         }
 
+        for remote_selection in &mut prepaint.remote_selections {
+            if let Some(path) = remote_selection.selection_path.take() {
+                window.paint_path(path, remote_selection.color.opacity(0.2));
+            }
+        }
+
         // Paint selections
         if window.is_window_active() {
             let secondary_selection = cx.theme().selection.saturation(0.1);
@@ -2107,6 +2255,12 @@ impl Element for TextElement {
                     );
                     offset_y += line_height;
                 }
+            }
+        }
+
+        for remote_selection in &prepaint.remote_selections {
+            if let Some(caret_bounds) = remote_selection.caret_bounds {
+                window.paint_quad(fill(caret_bounds, remote_selection.color));
             }
         }
 
@@ -2354,6 +2508,67 @@ fn split_runs_by_bg_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_visible_remote_selection_clips_range_and_caret_independently() {
+        assert_eq!(
+            visible_remote_selection(5, 15, &(10..20)),
+            VisibleRemoteSelection {
+                selection_range: Some(10..15),
+                caret_offset: Some(15),
+            }
+        );
+        assert_eq!(
+            visible_remote_selection(25, 5, &(10..20)),
+            VisibleRemoteSelection {
+                selection_range: Some(10..20),
+                caret_offset: None,
+            }
+        );
+        assert_eq!(
+            visible_remote_selection(15, 15, &(10..20)),
+            VisibleRemoteSelection {
+                selection_range: None,
+                caret_offset: Some(15),
+            }
+        );
+        assert_eq!(
+            visible_remote_selection(2, 2, &(10..20)),
+            VisibleRemoteSelection {
+                selection_range: None,
+                caret_offset: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_remote_caret_bounds_follow_text_geometry_and_right_edge() {
+        let bounds = Bounds::new(point(px(100.), px(200.)), size(px(80.), px(40.)));
+        let left_aligned = remote_caret_bounds(
+            point(px(12.), px(6.)),
+            px(5.),
+            &bounds,
+            px(10.),
+            px(20.),
+            crate::Size::Medium,
+            TextAlign::Left,
+        );
+        assert_eq!(
+            left_aligned,
+            Bounds::new(point(px(122.), px(212.5)), size(CURSOR_WIDTH, px(17.)))
+        );
+
+        let right_aligned = remote_caret_bounds(
+            point(px(100.), px(0.)),
+            px(0.),
+            &bounds,
+            px(10.),
+            px(20.),
+            crate::Size::Medium,
+            TextAlign::Right,
+        );
+        assert_eq!(right_aligned.right(), bounds.right());
+    }
 
     #[test]
     fn test_editor_scrollbar_layout_uses_current_scroll_size() {

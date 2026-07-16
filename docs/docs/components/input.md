@@ -178,6 +178,40 @@ cx.subscribe_in(&input, window, |view, state, event, window, cx| {
 });
 ```
 
+### Selection Presence
+
+Subscribe to `InputSelectionEvent` separately from `InputEvent` to observe the
+local selection. The event preserves direction: `anchor` is the fixed UTF-8
+byte offset and `head` is the caret offset.
+
+```rust
+use gpui_component::input::InputSelectionEvent;
+
+cx.subscribe(&input, |_, _, event: &InputSelectionEvent, _| {
+    println!("selection: {} -> {}", event.anchor, event.head);
+});
+```
+
+`InputRemoteSelection` renders another participant's selection without
+changing the local selection, focus, scrolling, or undo history. Setting the
+collection replaces the current remote selections. Expanded ranges render a
+low-opacity highlight and a full-color caret at `head`; collapsed ranges render
+only the caret.
+
+```rust
+use gpui::blue;
+use gpui_component::input::InputRemoteSelection;
+
+input.update(cx, |state, cx| {
+    state.set_remote_selections(
+        [InputRemoteSelection::new("participant-1", 4, 12, blue())],
+        cx,
+    );
+});
+```
+
+Call `clear_remote_selections` when the remote presence is no longer active.
+
 ### Custom Appearance
 
 ```rust

@@ -17,6 +17,7 @@ impl InputState {
 
         self.selected_range = (range.start..range.end).into();
         self.selected_word_range = Some(self.selected_range);
+        self.emit_selection_changed(cx);
         cx.notify()
     }
 
@@ -27,6 +28,7 @@ impl InputState {
         let range = TextSelector::line_range(&self.text, offset);
         self.selected_range = (range.start..range.end).into();
         self.selected_word_range = None;
+        self.emit_selection_changed(cx);
         cx.notify()
     }
 }
