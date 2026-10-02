@@ -724,13 +724,21 @@ mod tests {
     fn resizing_capacity_keeps_the_newest_samples_in_order() {
         let window_id = WindowId::from(1);
         let mut sampler = warmed_sampler(window_id, 4);
+        sampler.set_capacity(4);
+        assert_eq!(sampler.samples().len(), 0);
         sampler.ingest_draws(
             [5, 6, 7, 8]
                 .map(|millis| timing(window_id, Duration::from_millis(millis)))
                 .to_vec(),
         );
 
-        for (capacity, expected) in [(2, vec![7, 8]), (8, vec![7, 8]), (0, vec![8])] {
+        for (capacity, expected) in [
+            (4, vec![5, 6, 7, 8]),
+            (8, vec![5, 6, 7, 8]),
+            (2, vec![7, 8]),
+            (8, vec![7, 8]),
+            (0, vec![8]),
+        ] {
             sampler.set_capacity(capacity);
             assert_eq!(sampler.capacity(), capacity.max(1));
             assert_eq!(
