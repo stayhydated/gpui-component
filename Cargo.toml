@@ -46,6 +46,7 @@ resolver = "2"
 [workspace.package]
 publish = false
 edition = "2024"
+rust-version = "1.99"
 
 [workspace.dependencies]
 gpui-kit = { path = "crates/kit", version = "0.6.4" }

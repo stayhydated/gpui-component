@@ -159,8 +159,8 @@ pub(crate) fn run_bounded(
     let stderr = stderr.expect("loop exits only after stderr closes")?;
     Ok(Output {
         code: status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stdout: String::from_utf8_lossy_owned(stdout),
+        stderr: String::from_utf8_lossy_owned(stderr),
     })
 }
 
@@ -477,6 +477,28 @@ mod tests {
         assert_eq!(result.code, 0);
         assert_eq!(result.stdout, "out");
         assert_eq!(result.stderr, "err");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captures_empty_valid_and_invalid_utf8_streams() {
+        for (script, expected) in [
+            ("printf ''", ""),
+            ("printf '\\303\\251'", "é"),
+            ("printf '\\377'", "�"),
+            ("printf '\\342\\202'", "�"),
+        ] {
+            let result = run_bounded(
+                "/bin/sh",
+                &["-c".into(), format!("{script}; {script} >&2")],
+                Limits::for_test(Duration::from_secs(2), 1024),
+                Cancellation::new(),
+            )
+            .expect("command");
+            assert_eq!(result.code, 0);
+            assert_eq!(result.stdout, expected, "script: {script}");
+            assert_eq!(result.stderr, expected, "script: {script}");
+        }
     }
 
     #[cfg(unix)]

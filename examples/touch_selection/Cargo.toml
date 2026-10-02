@@ -4,6 +4,7 @@ description = "Touch selection handles and edit menu of Input, Textarea and Text
 version = "0.6.1"
 publish = false
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 gpui-kit.workspace = true

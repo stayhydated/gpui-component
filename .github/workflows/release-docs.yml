@@ -45,7 +45,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: wasm32-unknown-unknown
 

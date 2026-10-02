@@ -41,7 +41,7 @@ order: -1
 
 `gpui-component` 使用 Rust 构建，因此请确保系统已经安装 Rust 和 Cargo。
 
-- Rust 1.90 或更高版本
+- Rust 1.99 或更高版本（仓库固定使用 Rust 1.99.0）
 - Cargo（通常随 Rust 一起安装）
 
 安装库时，只需要在 `Cargo.toml` 的 `[dependencies]` 中加入：

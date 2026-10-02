@@ -4,6 +4,7 @@ default-run = "components"
 version = "0.6.4"
 publish = false
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 gpui.workspace = true
