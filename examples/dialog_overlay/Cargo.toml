@@ -4,7 +4,6 @@ description = "An example of using gpui-component to create a Dialog with overla
 version = "0.6.4"
 publish = false
 edition.workspace = true
-rust-version.workspace = true
 
 [dependencies]
 gpui-kit.workspace = true

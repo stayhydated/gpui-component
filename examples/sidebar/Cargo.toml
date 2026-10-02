@@ -4,7 +4,6 @@ description = "Example demonstrating shadcn-style sidebar collapsible modes (ico
 version = "0.6.1"
 publish = false
 edition.workspace = true
-rust-version.workspace = true
 
 [dependencies]
 gpui-kit.workspace = true

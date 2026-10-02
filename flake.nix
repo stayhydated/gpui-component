@@ -14,13 +14,6 @@
         pkgs = import nixpkgs {
           inherit system overlays;
         };
-        rustToolchain = pkgs.rust-bin.stable."1.99.0".default.override {
-          extensions = [ "rust-src" ];
-        };
-        rustPlatform = pkgs.makeRustPlatform {
-          cargo = rustToolchain;
-          rustc = rustToolchain;
-        };
         uiFont = pkgs.ibm-plex.override {
           families = [ "sans" ];
         };
@@ -30,7 +23,9 @@
         build-dependencies = with pkgs; [
           pkg-config # For dynamically linked libraries
           makeWrapper # To provide LD_LIBRARY_PATH to the final binary
-          rustToolchain
+          (rust-bin.beta.latest.default.override {
+            extensions = [ "rust-src" ];
+          })
         ];
         dynamic-libraries = with pkgs; [
           wayland
@@ -49,7 +44,7 @@
         ];
       in
       {
-        defaultPackage = rustPlatform.buildRustPackage (finalAttrs: {
+        defaultPackage = pkgs.rustPlatform.buildRustPackage (finalAttrs: {
           pname = "gpui-component-story";
           version = "0.5.1";
           src = ./.;

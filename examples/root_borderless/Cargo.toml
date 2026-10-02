@@ -4,7 +4,6 @@ description = "Example demonstrating disabling Root's window border wrapper."
 version = "0.6.4"
 publish = false
 edition.workspace = true
-rust-version.workspace = true
 
 [dependencies]
 gpui-kit.workspace = true

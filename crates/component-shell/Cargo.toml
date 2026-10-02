@@ -4,7 +4,6 @@ description = "gpui-component bindings for the gpui-shell runtime."
 version = "0.6.4"
 publish = false
 edition.workspace = true
-rust-version.workspace = true
 
 [lib]
 name = "gpui_component_shell"
