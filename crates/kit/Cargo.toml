@@ -11,6 +11,7 @@ repository = "https://github.com/longbridge/gpui-kit"
 readme = "README.md"
 publish = true
 edition.workspace = true
+rust-version.workspace = true
 
 [lints]
 workspace = true

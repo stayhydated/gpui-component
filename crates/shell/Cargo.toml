@@ -6,6 +6,7 @@ keywords = ["desktop", "gpui", "javascript", "runtime"]
 license = "Apache-2.0"
 publish = false
 edition.workspace = true
+rust-version.workspace = true
 repository = "https://github.com/longbridge/gpui-kit"
 homepage = "https://gpui-kit.com"
 

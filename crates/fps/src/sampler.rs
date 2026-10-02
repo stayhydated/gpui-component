@@ -137,9 +137,7 @@ impl FrameSampler {
 
     pub(crate) fn set_capacity(&mut self, capacity: usize) {
         self.capacity = capacity.max(1);
-        while self.samples.len() > self.capacity {
-            self.samples.pop_front();
-        }
+        self.samples.retain_back(self.capacity);
     }
 
     /// Frames presented per second, over the frames still inside
@@ -720,6 +718,30 @@ mod tests {
             draws,
             vec![Duration::from_millis(6), Duration::from_millis(7)]
         );
+    }
+
+    #[test]
+    fn resizing_capacity_keeps_the_newest_samples_in_order() {
+        let window_id = WindowId::from(1);
+        let mut sampler = warmed_sampler(window_id, 4);
+        sampler.ingest_draws(
+            [5, 6, 7, 8]
+                .map(|millis| timing(window_id, Duration::from_millis(millis)))
+                .to_vec(),
+        );
+
+        for (capacity, expected) in [(2, vec![7, 8]), (8, vec![7, 8]), (0, vec![8])] {
+            sampler.set_capacity(capacity);
+            assert_eq!(sampler.capacity(), capacity.max(1));
+            assert_eq!(
+                sampler
+                    .samples()
+                    .map(|sample| sample.draw.as_millis())
+                    .collect::<Vec<_>>(),
+                expected,
+                "capacity: {capacity}"
+            );
+        }
     }
 
     /// Feeds `count` presents spaced `interval` apart and returns the resulting

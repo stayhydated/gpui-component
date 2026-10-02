@@ -4,6 +4,7 @@ description = "A DataTable with its own scrollbar nested inside a scrollable pag
 version = "0.6.1"
 publish = false
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 gpui-kit.workspace = true

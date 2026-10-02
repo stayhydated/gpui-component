@@ -12,6 +12,7 @@ documentation = "https://docs.rs/gpui-base"
 version = "0.6.4"
 publish = true
 edition.workspace = true
+rust-version.workspace = true
 
 [lib]
 doctest = false

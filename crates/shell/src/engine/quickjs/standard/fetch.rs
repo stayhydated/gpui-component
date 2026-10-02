@@ -277,7 +277,7 @@ fn request(
         return Ok(FetchResponse {
             status,
             url: final_url,
-            body: String::from_utf8_lossy(&bytes).into_owned(),
+            body: String::from_utf8_lossy_owned(bytes),
         });
     }
     Err(format!("fetch exceeded the {MAX_REDIRECTS} redirect limit"))
@@ -372,6 +372,43 @@ fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{io::Write as _, net::TcpListener, thread};
+
+    #[test]
+    fn response_text_preserves_valid_utf8_and_replaces_invalid_sequences() {
+        for (body, expected) in [
+            (&b""[..], ""),
+            (&b"\xc3\xa9"[..], "é"),
+            (&b"\xff"[..], "�"),
+            (&b"\xe2\x82"[..], "�"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("HTTP listener");
+            let address = listener.local_addr().expect("listener address");
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("HTTP connection");
+                let mut request = [0; 1024];
+                stream.read(&mut request).expect("HTTP request");
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("HTTP headers");
+                stream.write_all(body).expect("HTTP body");
+            });
+
+            let response = request(
+                crate::Capabilities::new().network_hosts(["127.0.0.1".to_owned()]),
+                reqwest::Url::parse(&format!("http://{address}/")).expect("HTTP URL"),
+                FetchOptions::default(),
+                Some(direct_test_client().expect("HTTP client")),
+            );
+            server.join().expect("HTTP server");
+            let response = response.expect("HTTP response");
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, expected, "body: {body:?}");
+        }
+    }
 
     #[test]
     fn only_location_redirect_statuses_are_followed() {

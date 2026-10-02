@@ -37,7 +37,7 @@ Run `./script/bootstrap` to install system dependencies.
 
 We use Rust programming language to build the `gpui-component` library. Make sure you have Rust and Cargo installed on your system.
 
-- Rust 1.90 or later
+- Rust 1.99 or later (the repository pins Rust 1.99.0)
 - Cargo (comes with Rust)
 
 To install the `gpui-component` library, you can use Cargo, the Rust package manager. Add the following line to your `Cargo.toml` file under the `[dependencies]` section:

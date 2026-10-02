@@ -3,7 +3,8 @@ name = "system_monitor"
 description = "A real-time system resource monitor using GPUI Component charts."
 version = "0.6.1"
 publish = false
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 gpui-kit.workspace = true
