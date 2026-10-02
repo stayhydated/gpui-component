@@ -372,7 +372,11 @@ fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{io::Write as _, net::TcpListener, thread};
+    use std::{
+        io::{BufRead as _, BufReader, Write as _},
+        net::TcpListener,
+        thread,
+    };
 
     #[test]
     fn response_text_preserves_valid_utf8_and_replaces_invalid_sequences() {
@@ -386,8 +390,17 @@ mod tests {
             let address = listener.local_addr().expect("listener address");
             let server = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().expect("HTTP connection");
-                let mut request = [0; 1024];
-                stream.read(&mut request).expect("HTTP request");
+                {
+                    let mut request = BufReader::new(&mut stream);
+                    let mut line = String::new();
+                    loop {
+                        assert_ne!(request.read_line(&mut line).expect("HTTP request"), 0);
+                        if line == "\r\n" {
+                            break;
+                        }
+                        line.clear();
+                    }
+                }
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
